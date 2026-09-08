@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  test:
+    name: tests (python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # No install step: csched is stdlib-only and must stay that way.
+      - name: Assert no third-party imports crept in
+        run: |
+          python -m compileall -q csched tests
+          ! grep -rnE "^\s*(import|from)\s+(fastapi|flask|requests|httpx|pydantic|uvicorn|pytest)" csched/
+      - name: Run tests
+        run: python -m unittest discover -s tests -v

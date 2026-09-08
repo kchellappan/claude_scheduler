@@ -40,6 +40,13 @@ Install the poller as a user service:
     systemctl --user enable --now $(pwd)/systemd/csched-poller.service
     systemctl --user enable --now $(pwd)/systemd/csched-server.service
 
+## Tests
+
+    python3 -m unittest discover -s tests -v
+
+Stdlib `unittest`, no test dependencies. CI runs them on 3.11 and 3.12 and
+fails the build if a third-party import appears in `csched/`.
+
 ## Where the numbers come from
 
 `GET https://api.anthropic.com/api/oauth/usage`, authenticated with the OAuth
