@@ -29,7 +29,8 @@ def session_name(job):
 
 def is_blocked(job, busy):
     """A follow-up waiting for its target session to go idle."""
-    return bool(job["resume_session_id"]) and job["resume_session_id"] in busy
+    return bool(job["resume_session_id"]) and (
+        busy is None or job["resume_session_id"] in busy)
 
 
 def running_jobs(conn):
@@ -48,7 +49,10 @@ def next_launchable(conn, busy):
     for job in conn.execute(
             "SELECT * FROM jobs WHERE status='pending' "
             "ORDER BY priority, created_at"):
-        if job["resume_session_id"] in busy:
+        # busy is None when the session listing is unavailable; hold every
+        # follow-up rather than risk forking a live session.
+        if job["resume_session_id"] and (busy is None
+                                         or job["resume_session_id"] in busy):
             continue
         return job
     return None
@@ -81,7 +85,10 @@ def reconcile_running(conn, cli):
     live = running_jobs(conn)
     if not live:
         return
-    agents = {a.get("id"): a for a in cli.agents() if a.get("id")}
+    listing = cli.agents()
+    if listing is None:
+        return          # cannot ask; do not conclude everything finished
+    agents = {a.get("id"): a for a in listing if a.get("id")}
     for job in live:
         agent = agents.get(job["bg_id"])
         _capture_bridge(conn, cli, job, agent)
@@ -111,7 +118,10 @@ def backfill_bridge_ids(conn, cli):
     ).fetchall()
     if not missing:
         return
-    by_id = {a.get("id"): a for a in cli.agents() if a.get("id")}
+    listing = cli.agents()
+    if listing is None:
+        return
+    by_id = {a.get("id"): a for a in listing if a.get("id")}
     for job in missing:
         _capture_bridge(conn, cli, job, by_id.get(job["bg_id"]))
 
@@ -155,7 +165,7 @@ def tick(conn, cli):
         job = next_launchable(conn, busy)
         if job is None or not launch(conn, cli, job):
             break
-        if job["resume_session_id"]:
+        if job["resume_session_id"] and busy is not None:
             busy.add(job["resume_session_id"])
     conn.commit()
     return g

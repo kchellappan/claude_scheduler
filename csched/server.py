@@ -30,7 +30,11 @@ def agents():
 
 
 def busy_sessions():
-    return {a["sessionId"] for a in agents()
+    """Live session ids, or None when the listing is unavailable."""
+    listing = agents()
+    if listing is None:
+        return None
+    return {a["sessionId"] for a in listing
             if a.get("sessionId") and a.get("state") != "done"}
 
 
@@ -38,7 +42,7 @@ def resumable_sessions(conn):
     """Sessions a follow-up could continue: whatever is live, plus sessions
     previous jobs left behind."""
     seen, out = set(), []
-    for a in agents():
+    for a in agents() or []:
         sid = a.get("sessionId")
         if not sid or sid in seen:
             continue
@@ -103,8 +107,9 @@ def state():
             # The URL shape lives in one place; the page just renders it.
             job["rc_url"] = remote_control_url(job.pop("bridge_session_id"))
             # A follow-up waiting for its target session to go idle.
-            job["blocked"] = (job["status"] == "pending"
-                              and job["resume_session_id"] in busy)
+            job["blocked"] = bool(
+                job["status"] == "pending" and job["resume_session_id"]
+                and (busy is None or job["resume_session_id"] in busy))
         events = [dict(r) for r in conn.execute(
             "SELECT id,created_at,kind,payload FROM events "
             "ORDER BY id DESC LIMIT 15")]
@@ -187,7 +192,13 @@ class Handler(BaseHTTPRequestHandler):
                 # Refuse rather than fork. The page disables live sessions in
                 # the picker, but it refreshes on a timer, so its view can be
                 # a few seconds stale -- this is the check that actually holds.
-                if resume and resume in busy_sessions():
+                busy = busy_sessions()
+                if resume and busy is None:
+                    return self._send(409, json.dumps({
+                        "error": "cannot reach `claude` to check whether that "
+                                 "session is running; refusing rather than "
+                                 "risk forking it"}).encode())
+                if resume and resume in busy:
                     return self._send(409, json.dumps({
                         "error": "that session is running right now; "
                                  "resuming it would fork a copy rather than "

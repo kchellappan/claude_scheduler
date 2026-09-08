@@ -7,14 +7,20 @@ from csched import db, server
 
 
 class StateTest(unittest.TestCase):
+    # Never shell out to `claude` from a test: it may not be installed, and a
+    # test suite that depends on it is not hermetic.
+    AGENTS = []
+
     def setUp(self):
         db.init()
         self.conn = db.connect()
         for t in ("events", "jobs", "usage_samples", "meta"):
             self.conn.execute(f"DELETE FROM {t}")
         self.conn.commit()
+        server._agents_cache.update(at=float("inf"), value=self.AGENTS)
 
     def tearDown(self):
+        server._agents_cache.update(at=0.0, value=[])
         self.conn.close()
 
     def add(self, status="running", bridge=None, finished_at=None, started_at=None):
@@ -96,18 +102,12 @@ if __name__ == "__main__":
 
 
 class SessionListing(StateTest):
-    def setUp(self):
-        super().setUp()
-        server._agents_cache.update(at=float("inf"), value=[
-            {"sessionId": "live-1", "name": "my terminal", "cwd": "/repo",
-             "kind": "interactive"},
-            {"sessionId": "done-1", "name": "finished job", "cwd": "/repo",
-             "kind": "background", "state": "done"},
-        ])
-
-    def tearDown(self):
-        server._agents_cache.update(at=0.0, value=[])
-        super().tearDown()
+    AGENTS = [
+        {"sessionId": "live-1", "name": "my terminal", "cwd": "/repo",
+         "kind": "interactive"},
+        {"sessionId": "done-1", "name": "finished job", "cwd": "/repo",
+         "kind": "background", "state": "done"},
+    ]
 
     def test_live_session_is_marked_busy(self):
         by_id = {s["session_id"]: s for s in server.resumable_sessions(self.conn)}
@@ -132,21 +132,23 @@ class SessionListing(StateTest):
         self.assertTrue(server.state()["queue"]["jobs"][0]["blocked"])
 
 
-class PostJob(SessionListing):
-    """The HTTP path, since that is where the refusal is actually enforced."""
+class HTTPMixin:
+    """Serves the real handler on an ephemeral port.
 
-    def setUp(self):
-        super().setUp()
+    A mixin rather than a base class so a subclass can change the fixture
+    without also inheriting -- and silently re-running -- the parent's tests.
+    """
+
+    def start_http(self):
         from http.server import ThreadingHTTPServer
         import threading
         self.srv = ThreadingHTTPServer(("127.0.0.1", 0), server.Handler)
         self.port = self.srv.server_address[1]
         threading.Thread(target=self.srv.serve_forever, daemon=True).start()
 
-    def tearDown(self):
+    def stop_http(self):
         self.srv.shutdown()
         self.srv.server_close()
-        super().tearDown()
 
     def post(self, payload):
         import urllib.error
@@ -160,6 +162,18 @@ class PostJob(SessionListing):
                 return r.status, json.loads(r.read())
         except urllib.error.HTTPError as e:
             return e.code, json.loads(e.read())
+
+
+class PostJob(HTTPMixin, SessionListing):
+    """The HTTP path, since that is where the refusal is actually enforced."""
+
+    def setUp(self):
+        super().setUp()
+        self.start_http()
+
+    def tearDown(self):
+        self.stop_http()
+        super().tearDown()
 
     def test_resuming_a_live_session_is_refused(self):
         """The page disables these in the picker, but it refreshes on a timer,
@@ -185,3 +199,35 @@ class PostJob(SessionListing):
     def test_empty_prompt_is_refused(self):
         status, _ = self.post({"prompt": "   "})
         self.assertEqual(status, 400)
+
+
+class ListingUnavailable(HTTPMixin, StateTest):
+    """`claude` missing or hanging yields None, not an empty listing. Every
+    safety check has to treat that as unknown rather than as "nothing is
+    running", or it fails open."""
+
+    AGENTS = None
+
+    def setUp(self):
+        super().setUp()
+        self.start_http()
+
+    def tearDown(self):
+        self.stop_http()
+        super().tearDown()
+
+    def test_no_sessions_are_offered(self):
+        self.assertEqual(server.resumable_sessions(self.conn), [])
+
+    def test_busy_sessions_is_unknown_not_empty(self):
+        self.assertIsNone(server.busy_sessions())
+
+    def test_resume_is_refused_rather_than_risked(self):
+        status, body = self.post({"prompt": "hi", "resume_session_id": "x"})
+        self.assertEqual(status, 409)
+        self.assertIn("cannot reach", body["error"])
+
+    def test_a_fresh_job_is_still_accepted(self):
+        """Only follow-ups depend on the listing; ordinary work must not stop."""
+        status, _ = self.post({"prompt": "hi"})
+        self.assertEqual(status, 200)

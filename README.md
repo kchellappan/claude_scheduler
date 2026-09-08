@@ -71,6 +71,14 @@ A session missing from `claude agents --json --all` is treated as finished. We
 cannot distinguish "crashed" from "cleaned up", and leaving the job `running`
 forever would wedge the queue behind it.
 
+For that reason `ClaudeCLI.agents()` returns **None**, not `[]`, when the
+listing could not be obtained -- `claude` missing, hanging, or returning
+nonsense. "No sessions" and "could not ask" must not be conflated: since an
+absent session counts as finished, one timed-out call would otherwise mark
+every running job done. Unknown also counts as busy when deciding whether a
+follow-up may resume, since refusing is recoverable and forking a live session
+is not.
+
 ### Choosing a model
 
 `-m/--model` takes `opus`, `sonnet`, `haiku`, `fable`, or a full model name,

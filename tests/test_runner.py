@@ -17,10 +17,11 @@ class FakeCLI:
         self.fail_with = fail_with
         self.bridges = {}
         self.busy = set()
+        self.listing_ok = True     # False mimics `claude agents` failing
         self._next = 0
 
     def busy_sessions(self):
-        return set(self.busy)
+        return set(self.busy) if self.listing_ok else None
 
     def spawn(self, prompt, cwd, name, model=None, resume=None):
         if self.fail_with:
@@ -34,7 +35,7 @@ class FakeCLI:
         return bg_id
 
     def agents(self):
-        return list(self.sessions)
+        return list(self.sessions) if self.listing_ok else None
 
     def finish(self, bg_id):
         for s in self.sessions:
@@ -315,3 +316,56 @@ class ResumingSessions(RunnerTest):
         runner.tick(self.conn, self.cli)
         self.assertEqual(self.job(blocked)["status"], "pending")
         self.assertEqual(self.job(other)["status"], "running")
+
+
+class ListingUnavailable(RunnerTest):
+    """Regression: `claude agents` failing returned [], and a job whose session
+    is absent counts as finished -- so one timeout marked every running job
+    done. Unavailable is now None and must be treated as "do not conclude"."""
+
+    def test_running_jobs_are_not_marked_done(self):
+        self.usage()
+        jid = self.add()
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+        self.cli.listing_ok = False         # listing unavailable
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+
+    def test_queue_drained_is_not_emitted(self):
+        self.usage()
+        self.add()
+        runner.tick(self.conn, self.cli)
+        self.cli.listing_ok = False
+        runner.tick(self.conn, self.cli)
+        self.assertNotIn("queue_drained", self.kinds())
+
+    def test_follow_ups_are_held(self):
+        self.usage()
+        cur = self.conn.execute(
+            "INSERT INTO jobs(prompt,working_dir,created_at,resume_session_id)"
+            " VALUES('f','/tmp',?,'sess-abc')", (db.utcnow(),))
+        self.conn.commit()
+        self.cli.listing_ok = False
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(cur.lastrowid)["status"], "pending")
+
+    def test_ordinary_jobs_still_launch(self):
+        self.usage()
+        jid = self.add()
+        self.cli.listing_ok = False
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+
+
+class RealCLIFailures(unittest.TestCase):
+    def test_missing_binary_yields_none_not_empty(self):
+        from csched.claudecli import ClaudeCLI
+        cli = ClaudeCLI(binary="definitely-not-a-real-binary-xyz")
+        self.assertIsNone(cli.agents())
+        self.assertIsNone(cli.busy_sessions())
+
+    def test_unknown_session_state_counts_as_busy(self):
+        from csched.claudecli import ClaudeCLI
+        cli = ClaudeCLI(binary="definitely-not-a-real-binary-xyz")
+        self.assertTrue(cli.session_busy("anything"))

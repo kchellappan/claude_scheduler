@@ -56,25 +56,37 @@ class ClaudeCLI:
         return match.group(1)
 
     def agents(self):
-        """All sessions including completed background ones."""
+        """All sessions including completed background ones.
+
+        Returns None -- not [] -- when the listing could not be obtained.
+        Callers must not read "no sessions" out of "could not ask": a job whose
+        session is absent counts as finished, so conflating the two would mark
+        every running job done the first time this timed out.
+        """
         try:
             proc = self._run(["agents", "--json", "--all"], timeout=60)
             return json.loads(proc.stdout or "[]")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError):
-            return []
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            return None
 
     def busy_sessions(self):
-        """Session ids that are live right now.
+        """Session ids that are live right now, or None if unknowable.
 
         Interactive sessions carry no `state`, so anything listed without a
         finished state counts as busy -- that is what stops a queued follow-up
         from forking a terminal you are actively typing in.
         """
-        return {a["sessionId"] for a in self.agents()
+        agents = self.agents()
+        if agents is None:
+            return None
+        return {a["sessionId"] for a in agents
                 if a.get("sessionId") and a.get("state") != "done"}
 
     def session_busy(self, session_id):
-        return session_id in self.busy_sessions()
+        """Unknown counts as busy: refusing a resume we cannot verify is
+        recoverable, forking a live session is not."""
+        busy = self.busy_sessions()
+        return True if busy is None else session_id in busy
 
     def stop(self, bg_id):
         try:
