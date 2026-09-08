@@ -138,8 +138,11 @@ change the schema, edit it and delete the database:
 
     rm ~/.local/state/csched/csched.db
 
-The only thing lost is usage-sample history, which the poller rebuilds. Nothing
-here is worth the cost of migrations.
+The only thing lost is usage-sample history, which the poller rebuilds.
+
+This holds while the project is single-user and pre-production; nothing here is
+yet worth the cost of migrations. Revisit if it gains other users or state that
+would hurt to lose.
 
 ## Known limitation
 
