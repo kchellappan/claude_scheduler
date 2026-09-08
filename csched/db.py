@@ -19,26 +19,10 @@ def connect() -> sqlite3.Connection:
     return conn
 
 
-# Columns added after the first release. CREATE TABLE IF NOT EXISTS will not
-# add them to a database that already exists, so apply them explicitly.
-_MIGRATIONS = [
-    ("jobs", "bg_id", "TEXT"),
-    ("jobs", "bridge_session_id", "TEXT"),
-]
-
-
-def _migrate(conn) -> None:
-    for table, column, decl in _MIGRATIONS:
-        cols = {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
-        if column not in cols:
-            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
-
-
 def init() -> None:
     schema = (Path(__file__).parent / "schema.sql").read_text()
     with connect() as conn:
         conn.executescript(schema)
-        _migrate(conn)
 
 
 def get_meta(conn, key, default=None):

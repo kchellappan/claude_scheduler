@@ -131,6 +131,16 @@ fire on *transitions*, recorded in the `events` table with a `notified_at`
 column. The notifier drains that table. Level-triggered checks would push you
 every 180 seconds.
 
+## Schema changes
+
+`schema.sql` is the only source of truth and there is no migration path. To
+change the schema, edit it and delete the database:
+
+    rm ~/.local/state/csched/csched.db
+
+The only thing lost is usage-sample history, which the poller rebuilds. Nothing
+here is worth the cost of migrations.
+
 ## Known limitation
 
 If this machine sleeps, nothing polls and nothing pushes — worst overnight,
