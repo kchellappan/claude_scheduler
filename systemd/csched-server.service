@@ -1,0 +1,16 @@
+[Unit]
+Description=csched dashboard
+After=network-online.target tailscaled.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/GithubRepos/claude_scheduler
+ExecStart=/usr/bin/python3 -m csched.server
+Restart=always
+RestartSec=10
+# Host auto-detects the Tailscale IP; set CSCHED_HOST to override.
+Environment=CSCHED_PORT=8787
+
+[Install]
+WantedBy=default.target

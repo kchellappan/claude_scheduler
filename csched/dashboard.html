@@ -1,0 +1,238 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#11131a">
+<title>csched</title>
+<style>
+:root{
+  --bg:#f6f7f9; --card:#fff; --ink:#14171f; --dim:#6b7280; --line:#e4e7ec;
+  --ok:#128a4d; --warn:#b46b00; --bad:#c0392b; --track:#e8ebf0; --accent:#4f46e5;
+}
+@media (prefers-color-scheme:dark){:root{
+  --bg:#0d0f14; --card:#161923; --ink:#e8eaf0; --dim:#8b93a5; --line:#242938;
+  --ok:#3ecf8e; --warn:#e0a33a; --bad:#f0685e; --track:#232838; --accent:#8b8ff5;
+}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+  font:15px/1.5 ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+  padding:16px 14px 40px;max-width:760px;margin-inline:auto;
+  padding-bottom:calc(40px + env(safe-area-inset-bottom))}
+h1{font-size:13px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);
+  margin:0 0 14px;font-weight:600}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;
+  padding:16px;margin-bottom:12px}
+.gate{display:flex;align-items:baseline;gap:12px;flex-wrap:wrap}
+.gate b{font-size:30px;letter-spacing:-.02em;line-height:1.1}
+.gate.open b{color:var(--ok)} .gate.held b{color:var(--warn)}
+.reasons{color:var(--dim);font-size:13px}
+.row{margin-top:18px}
+.row:first-child{margin-top:0}
+.lab{display:flex;justify-content:space-between;align-items:baseline;
+  font-size:13px;margin-bottom:6px}
+.lab .name{font-weight:600}
+.lab .pct{font-variant-numeric:tabular-nums;font-size:19px;font-weight:600;
+  letter-spacing:-.01em}
+.lab .meta{color:var(--dim);font-size:12px}
+.track{position:relative;height:12px;background:var(--track);border-radius:6px;
+  overflow:hidden}
+.fill{height:100%;border-radius:6px;transition:width .5s ease,background .3s}
+.tick{position:absolute;top:-3px;bottom:-3px;width:2px;background:var(--ink);
+  opacity:.55;border-radius:1px}
+.note{color:var(--dim);font-size:12.5px;margin-top:7px}
+.spark{width:100%;height:44px;display:block;margin-top:4px}
+.job{display:flex;gap:10px;align-items:flex-start;padding:10px 0;
+  border-top:1px solid var(--line)}
+.job:first-of-type{border-top:0}
+.dot{flex:none;width:8px;height:8px;border-radius:50%;margin-top:7px}
+.job .txt{flex:1;min-width:0}
+.job .p{overflow-wrap:anywhere}
+.job .sub{color:var(--dim);font-size:12px;margin-top:2px}
+button{font:inherit;border:1px solid var(--line);background:transparent;
+  color:var(--dim);border-radius:8px;padding:5px 10px;cursor:pointer}
+button:hover{color:var(--ink);border-color:var(--dim)}
+button.primary{background:var(--accent);color:#fff;border-color:transparent;
+  padding:10px 16px;font-weight:600}
+textarea,input{font:inherit;width:100%;background:var(--bg);color:var(--ink);
+  border:1px solid var(--line);border-radius:9px;padding:10px}
+textarea{resize:vertical;min-height:70px}
+.form{display:flex;flex-direction:column;gap:9px;margin-top:12px}
+.form .side{display:flex;gap:9px}
+.form .side input{flex:1}
+.ev{display:flex;gap:10px;font-size:12.5px;padding:5px 0;color:var(--dim)}
+.ev time{flex:none;font-variant-numeric:tabular-nums}
+.ev .k{color:var(--ink);font-weight:600;flex:none;min-width:110px}
+.empty{color:var(--dim);font-size:13.5px;padding:6px 0}
+.stale{background:var(--bad);color:#fff;padding:9px 12px;border-radius:10px;
+  font-size:13px;margin-bottom:12px}
+</style>
+
+<h1>csched</h1>
+<div id="stale"></div>
+
+<div class="card">
+  <div class="gate" id="gate"><b>…</b></div>
+</div>
+
+<div class="card">
+  <div class="row">
+    <div class="lab"><span class="name">5-hour</span>
+      <span><span class="pct" id="p5">–</span></span></div>
+    <div class="track"><div class="fill" id="f5"></div><div class="tick" id="t5"></div></div>
+    <div class="note" id="n5"></div>
+  </div>
+  <div class="row">
+    <div class="lab"><span class="name">weekly</span>
+      <span><span class="pct" id="p7">–</span></span></div>
+    <div class="track"><div class="fill" id="f7"></div><div class="tick" id="t7"></div></div>
+    <div class="note" id="n7"></div>
+  </div>
+  <svg class="spark" id="spark" preserveAspectRatio="none"></svg>
+</div>
+
+<div class="card">
+  <div class="lab"><span class="name">Queue</span><span class="meta" id="qmeta"></span></div>
+  <div id="jobs"></div>
+  <div class="form">
+    <textarea id="prompt" placeholder="Queue a prompt…"></textarea>
+    <div class="side">
+      <input id="cwd" placeholder="working dir (default ~)">
+      <input id="prio" type="number" value="100" style="max-width:96px" title="priority">
+    </div>
+    <button class="primary" id="add">Queue it</button>
+  </div>
+</div>
+
+<div class="card">
+  <div class="lab"><span class="name">Recent events</span></div>
+  <div id="events"></div>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v);
+const colour = p => p < 50 ? css('--ok') : p < 80 ? css('--warn') : css('--bad');
+
+function rel(iso){
+  if(!iso) return 'unknown';
+  let s = Math.round((new Date(iso) - Date.now())/1000);
+  const past = s < 0; s = Math.abs(s);
+  const d = Math.floor(s/86400), h = Math.floor(s%86400/3600), m = Math.floor(s%3600/60);
+  const t = d ? `${d}d ${h}h` : h ? `${h}h ${m}m` : `${m}m`;
+  return past ? `${t} ago` : `in ${t}`;
+}
+
+function gauge(pct, allow, fill, tick){
+  const p = pct == null ? 0 : Math.min(pct, 100);
+  $(fill).style.width = p + '%';
+  $(fill).style.background = colour(p);
+  const t = $(tick);
+  if(allow == null){ t.style.display = 'none'; }
+  else { t.style.display = 'block'; t.style.left = Math.min(allow,100) + '%'; }
+}
+
+function sparkline(hist){
+  const svg = $('spark'), W = 300, H = 44;
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  if(hist.length < 2){ svg.innerHTML = ''; return; }
+  const line = (key, col) => {
+    const pts = hist.map((h,i) => {
+      const x = i/(hist.length-1)*W;
+      const y = H - (Math.min(h[key] ?? 0,100)/100)*(H-4) - 2;
+      return `${x.toFixed(1)},${y.toFixed(1)}`;
+    }).join(' ');
+    return `<polyline points="${pts}" fill="none" stroke="${col}"
+             stroke-width="1.5" stroke-linejoin="round" vector-effect="non-scaling-stroke"/>`;
+  };
+  svg.innerHTML = line('seven_day_pct', css('--accent')) +
+                  line('five_hour_pct', css('--dim'));
+}
+
+async function refresh(){
+  let s;
+  try { s = await (await fetch('/api/state')).json(); }
+  catch(e){ $('stale').innerHTML = '<div class="stale">dashboard cannot reach the server</div>'; return; }
+
+  const u = s.usage, g = s.gate, c = s.config;
+
+  $('stale').innerHTML = g.stale
+    ? `<div class="stale">Reading is ${Math.round((u.age_s||0)/60)}m old — is the poller running?
+       <code>systemctl --user status csched-poller</code></div>` : '';
+
+  $('gate').className = 'gate ' + (g.open ? 'open' : 'held');
+  $('gate').innerHTML = `<b>${g.open ? 'OPEN' : 'HELD'}</b>` +
+    `<span class="reasons">${g.open
+      ? 'capacity available — queued work can run'
+      : g.reasons.join(' · ')}</span>`;
+
+  $('p5').textContent = u.five_hour_pct == null ? '–' : u.five_hour_pct.toFixed(0) + '%';
+  gauge(u.five_hour_pct, c.five_hour_max, 'f5', 't5');
+  $('n5').textContent = `cap ${c.five_hour_max}% · resets ${rel(u.five_hour_resets_at)}`;
+
+  $('p7').textContent = u.seven_day_pct == null ? '–' : u.seven_day_pct.toFixed(0) + '%';
+  gauge(u.seven_day_pct, u.weekly_allowance_pct, 'f7', 't7');
+  let pace = '';
+  if(u.week_elapsed_pct != null){
+    const r = u.week_elapsed_pct ? u.seven_day_pct / u.week_elapsed_pct : 0;
+    const verdict = r < 0.85 ? 'under-spending' : r <= 1.15 ? 'on pace' : 'ahead of pace';
+    pace = ` · week ${u.week_elapsed_pct.toFixed(0)}% elapsed → ${verdict} (${r.toFixed(2)}×)`;
+  }
+  $('n7').textContent =
+    `pace allows ${(u.weekly_allowance_pct ?? 0).toFixed(0)}% · resets ${rel(u.seven_day_resets_at)}${pace}`;
+
+  sparkline(s.history);
+
+  $('qmeta').textContent = `${s.queue.pending} pending · ${s.queue.running} running`;
+  $('jobs').innerHTML = s.queue.jobs.length ? s.queue.jobs.map(j => {
+    const col = {pending:css('--dim'), running:css('--warn'), done:css('--ok'),
+                 failed:css('--bad'), cancelled:css('--line')}[j.status];
+    const dir = j.working_dir.split('/').pop();
+    return `<div class="job"><div class="dot" style="background:${col}"></div>
+      <div class="txt"><div class="p">${esc(j.prompt)}</div>
+      <div class="sub">#${j.id} · ${j.status} · ${esc(dir)} · p${j.priority}${
+        j.error ? ' · ' + esc(j.error) : ''}</div></div>
+      ${j.status === 'pending'
+        ? `<button onclick="cancel(${j.id})">cancel</button>` : ''}</div>`;
+  }).join('') : '<div class="empty">Nothing queued.</div>';
+
+  $('events').innerHTML = s.events.length ? s.events.map(e =>
+    `<div class="ev"><time>${new Date(e.created_at).toLocaleTimeString([], 
+      {hour:'2-digit',minute:'2-digit'})}</time>
+     <span class="k">${esc(e.kind)}</span>
+     <span>${esc(summarise(e.payload))}</span></div>`).join('')
+    : '<div class="empty">No events yet.</div>';
+}
+
+function summarise(p){
+  if(!p) return '';
+  try {
+    const o = JSON.parse(p);
+    if(o.reasons && o.reasons.length) return o.reasons.join('; ');
+    if(o.detail) return o.detail;
+    if(o.five_hour_pct != null) return `5h ${o.five_hour_pct}% · weekly ${o.seven_day_pct}%`;
+    return '';
+  } catch { return ''; }
+}
+const esc = s => String(s ?? '').replace(/[&<>"]/g,
+  c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+async function cancel(id){
+  await fetch(`/api/jobs/${id}/cancel`, {method:'POST',
+    headers:{'Content-Type':'application/json'}, body:'{}'});
+  refresh();
+}
+
+$('add').onclick = async () => {
+  const prompt = $('prompt').value.trim();
+  if(!prompt) return;
+  $('add').disabled = true;
+  await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({prompt, working_dir: $('cwd').value.trim() || null,
+                          priority: Number($('prio').value) || 100})});
+  $('prompt').value = ''; $('add').disabled = false;
+  refresh();
+};
+
+refresh();
+setInterval(refresh, 10000);
+document.addEventListener('visibilitychange', () => !document.hidden && refresh());
+</script>

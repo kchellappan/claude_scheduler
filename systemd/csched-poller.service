@@ -1,0 +1,16 @@
+[Unit]
+Description=csched usage poller
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/GithubRepos/claude_scheduler
+ExecStart=/usr/bin/python3 -m csched poll
+Restart=always
+RestartSec=30
+# Keep sampling while the desk is idle; without this a suspend blinds the gate.
+Environment=CSCHED_POLL_INTERVAL=180
+
+[Install]
+WantedBy=default.target
