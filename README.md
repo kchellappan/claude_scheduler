@@ -32,6 +32,9 @@ Plain HTTP is fine for viewing. Installing it as a PWA and receiving web push
 
     ./csched.sh status      # gauges, gate state, queue depth
     ./csched.sh add "..."   # queue a prompt (-C workdir, -p priority)
+                            #   -m sonnet        pick the model
+                            #   --resume <id>    continue an existing session
+    ./csched.sh sessions    # sessions a follow-up could continue
     ./csched.sh ls          # what is queued
     ./csched.sh events      # gate transitions
     ./csched.sh poll        # run the poller in the foreground
@@ -67,6 +70,42 @@ single tick and would otherwise lose its URL entirely.
 A session missing from `claude agents --json --all` is treated as finished. We
 cannot distinguish "crashed" from "cleaned up", and leaving the job `running`
 forever would wedge the queue behind it.
+
+### Choosing a model
+
+`-m/--model` takes `opus`, `sonnet`, `haiku`, `fable`, or a full model name,
+and is passed straight through to `claude --model`. Left unset, Claude Code
+picks.
+
+This is always the user's choice. The gate never substitutes a cheaper model to
+squeeze a job through, because silently answering a different question than the
+one asked is worse than waiting.
+
+It does matter for pacing, though: on a Pro plan `seven_day_opus` and
+`seven_day_sonnet` come back null, so there are no per-model buckets -- one
+shared weekly budget, drained at very different rates depending on the model.
+
+### Continuing an existing session
+
+`--resume <session-id>` continues a session with its history intact rather than
+starting fresh. `csched sessions` lists candidates: whatever is live right now,
+plus sessions previous jobs left behind.
+
+A session that is **currently running cannot be resumed**. Claude Code forks a
+copy under a new id rather than continuing the conversation:
+
+    note: session 1bbb712a is already running in the background,
+    so this started a copy as 5fb74dbb.
+
+So both entry points refuse it up front -- the CLI exits non-zero, and the API
+returns 409 while the dashboard disables those sessions in its picker. The
+picker refreshes on a timer, so its view can be seconds stale; the server check
+is the one that actually holds.
+
+If a job's target session is idle at queue time but live when its turn comes,
+the runner **waits**: the job is skipped, not launched, and starts on a later
+tick once the session frees up. Skipping rather than stopping means one blocked
+follow-up does not hold up everything queued behind it.
 
 ### Sessions you start yourself are not gated
 

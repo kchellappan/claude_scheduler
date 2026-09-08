@@ -6,13 +6,56 @@ auth boundary.
 """
 import json
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 from . import config, db, gate, poller
-from .claudecli import remote_control_url
+from .claudecli import ClaudeCLI, remote_control_url
+
+_CLI = ClaudeCLI()
+# `claude agents --json` takes a second or two; the page polls every 10s, so
+# cache it rather than shelling out on every request.
+_AGENTS_TTL_S = 15
+_agents_cache = {"at": 0.0, "value": []}
+
+
+def agents():
+    now = time.monotonic()
+    if now - _agents_cache["at"] > _AGENTS_TTL_S:
+        _agents_cache.update(at=now, value=_CLI.agents())
+    return _agents_cache["value"]
+
+
+def busy_sessions():
+    return {a["sessionId"] for a in agents()
+            if a.get("sessionId") and a.get("state") != "done"}
+
+
+def resumable_sessions(conn):
+    """Sessions a follow-up could continue: whatever is live, plus sessions
+    previous jobs left behind."""
+    seen, out = set(), []
+    for a in agents():
+        sid = a.get("sessionId")
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        out.append({"session_id": sid, "name": a.get("name") or sid[:8],
+                    "cwd": a.get("cwd"), "busy": a.get("state") != "done",
+                    "source": a.get("kind") or "session"})
+    for r in conn.execute(
+            "SELECT DISTINCT session_id, prompt, working_dir FROM jobs "
+            "WHERE session_id IS NOT NULL ORDER BY id DESC LIMIT 25"):
+        if r["session_id"] in seen:
+            continue
+        seen.add(r["session_id"])
+        out.append({"session_id": r["session_id"],
+                    "name": " ".join(r["prompt"].split())[:48],
+                    "cwd": r["working_dir"], "busy": False, "source": "csched"})
+    return out
 
 HTML = (Path(__file__).parent / "dashboard.html").read_bytes()
 PORT = int(os.environ.get("CSCHED_PORT", "8787"))
@@ -50,13 +93,18 @@ def state():
         cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         jobs = [dict(r) for r in conn.execute(
             "SELECT id,prompt,working_dir,priority,status,created_at,started_at,"
-            "finished_at,attempts,error,bridge_session_id FROM jobs "
+            "finished_at,attempts,error,bridge_session_id,model,"
+            "resume_session_id FROM jobs "
             "WHERE status IN ('pending','running') OR finished_at > ? "
             "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 "
             "  ELSE 2 END, priority, created_at LIMIT 50", (cutoff,))]
+        busy = busy_sessions()
         for job in jobs:
             # The URL shape lives in one place; the page just renders it.
             job["rc_url"] = remote_control_url(job.pop("bridge_session_id"))
+            # A follow-up waiting for its target session to go idle.
+            job["blocked"] = (job["status"] == "pending"
+                              and job["resume_session_id"] in busy)
         events = [dict(r) for r in conn.execute(
             "SELECT id,created_at,kind,payload FROM events "
             "ORDER BY id DESC LIMIT 15")]
@@ -83,6 +131,7 @@ def state():
                 "poll_interval_s": config.POLL_INTERVAL_S,
             },
             "queue": {"pending": pending, "running": running, "jobs": jobs},
+            "sessions": resumable_sessions(conn),
             "events": events,
             "history": history,
         }
@@ -110,6 +159,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, HTML, "text/html; charset=utf-8")
         if path == "/api/state":
             return self._send(200, json.dumps(state()).encode())
+        if path == "/api/sessions":
+            conn = db.connect()
+            try:
+                return self._send(
+                    200, json.dumps(resumable_sessions(conn)).encode())
+            finally:
+                conn.close()
         self._send(404, b'{"error":"not found"}')
 
     def do_POST(self):
@@ -126,13 +182,28 @@ class Handler(BaseHTTPRequestHandler):
                 prompt = (body.get("prompt") or "").strip()
                 if not prompt:
                     return self._send(400, b'{"error":"empty prompt"}')
+
+                resume = (body.get("resume_session_id") or "").strip() or None
+                # Refuse rather than fork. The page disables live sessions in
+                # the picker, but it refreshes on a timer, so its view can be
+                # a few seconds stale -- this is the check that actually holds.
+                if resume and resume in busy_sessions():
+                    return self._send(409, json.dumps({
+                        "error": "that session is running right now; "
+                                 "resuming it would fork a copy rather than "
+                                 "continue it"}).encode())
+
+                model = (body.get("model") or "").strip() or None
+                if model and len(model) > 64:
+                    return self._send(400, b'{"error":"model name too long"}')
+
                 cwd = os.path.abspath(
                     body.get("working_dir") or os.path.expanduser("~"))
                 cur = conn.execute(
-                    "INSERT INTO jobs(prompt,working_dir,priority,created_at,source)"
-                    " VALUES (?,?,?,?,?)",
+                    "INSERT INTO jobs(prompt,working_dir,priority,created_at,"
+                    "source,model,resume_session_id) VALUES (?,?,?,?,?,?,?)",
                     (prompt, cwd, int(body.get("priority", 100)),
-                     db.utcnow(), body.get("source", "phone")))
+                     db.utcnow(), body.get("source", "phone"), model, resume))
                 conn.commit()
                 return self._send(200, json.dumps({"id": cur.lastrowid}).encode())
 

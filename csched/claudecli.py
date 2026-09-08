@@ -30,14 +30,25 @@ class ClaudeCLI:
             [self.binary, *args], cwd=cwd, capture_output=True, text=True,
             timeout=timeout or self.timeout)
 
-    def spawn(self, prompt, cwd, name):
+    def spawn(self, prompt, cwd, name, model=None, resume=None):
         """Start a detached, Remote-Control-enabled session. Returns its short id.
 
         --bg detaches so no TTY is needed; --remote-control still applies, which
         is what makes the session reachable from the phone. Headless (-p) would
         not be: Remote Control attaches to interactive sessions only.
+
+        With `resume`, the prompt continues that session with its history
+        intact. Only safe when the target is idle -- Claude Code forks a copy
+        under a new id if it is still running, which is not a continuation.
+        Callers check `session_busy` first.
         """
-        proc = self._run(["--bg", "--remote-control", name, prompt], cwd=cwd)
+        args = ["--bg"]
+        if resume:
+            args += ["--resume", resume]
+        if model:
+            args += ["--model", model]
+        args += ["--remote-control", name, prompt]
+        proc = self._run(args, cwd=cwd)
         match = _BG_ID.search(proc.stdout or "")
         if not match:
             raise SpawnError(
@@ -51,6 +62,19 @@ class ClaudeCLI:
             return json.loads(proc.stdout or "[]")
         except (subprocess.TimeoutExpired, json.JSONDecodeError):
             return []
+
+    def busy_sessions(self):
+        """Session ids that are live right now.
+
+        Interactive sessions carry no `state`, so anything listed without a
+        finished state counts as busy -- that is what stops a queued follow-up
+        from forking a terminal you are actively typing in.
+        """
+        return {a["sessionId"] for a in self.agents()
+                if a.get("sessionId") and a.get("state") != "done"}
+
+    def session_busy(self, session_id):
+        return session_id in self.busy_sessions()
 
     def stop(self, bg_id):
         try:

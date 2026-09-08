@@ -27,15 +27,31 @@ def session_name(job):
     return f"csched #{job['id']}: {head}"
 
 
+def is_blocked(job, busy):
+    """A follow-up waiting for its target session to go idle."""
+    return bool(job["resume_session_id"]) and job["resume_session_id"] in busy
+
+
 def running_jobs(conn):
     return conn.execute(
         "SELECT * FROM jobs WHERE status='running' ORDER BY id").fetchall()
 
 
-def next_pending(conn):
-    return conn.execute(
-        "SELECT * FROM jobs WHERE status='pending' "
-        "ORDER BY priority, created_at LIMIT 1").fetchone()
+def next_launchable(conn, busy):
+    """Highest-priority pending job that can start now.
+
+    A follow-up whose target session is still live is skipped rather than
+    launched: Claude Code would fork a copy under a new id instead of
+    continuing the conversation. Skipping rather than stopping means one
+    blocked follow-up does not hold up everything queued behind it.
+    """
+    for job in conn.execute(
+            "SELECT * FROM jobs WHERE status='pending' "
+            "ORDER BY priority, created_at"):
+        if job["resume_session_id"] in busy:
+            continue
+        return job
+    return None
 
 
 def _capture_bridge(conn, cli, job, agent):
@@ -103,7 +119,8 @@ def backfill_bridge_ids(conn, cli):
 def launch(conn, cli, job):
     attempts = job["attempts"] + 1
     try:
-        bg_id = cli.spawn(job["prompt"], job["working_dir"], session_name(job))
+        bg_id = cli.spawn(job["prompt"], job["working_dir"], session_name(job),
+                          model=job["model"], resume=job["resume_session_id"])
     except (SpawnError, OSError) as e:
         failed = attempts >= job["max_attempts"]
         conn.execute(
@@ -133,10 +150,13 @@ def tick(conn, cli):
         conn.commit()
         return g
 
+    busy = cli.busy_sessions()
     while len(running_jobs(conn)) < config.MAX_CONCURRENT:
-        job = next_pending(conn)
+        job = next_launchable(conn, busy)
         if job is None or not launch(conn, cli, job):
             break
+        if job["resume_session_id"]:
+            busy.add(job["resume_session_id"])
     conn.commit()
     return g
 

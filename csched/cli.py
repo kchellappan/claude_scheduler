@@ -5,7 +5,7 @@ import sys
 from datetime import datetime, timezone
 
 from . import config, db, gate, poller, runner
-from .claudecli import remote_control_url
+from .claudecli import ClaudeCLI, remote_control_url
 
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
 GREEN, YELLOW, RED, GREY = "\033[32m", "\033[33m", "\033[31m", "\033[90m"
@@ -82,13 +82,39 @@ def cmd_add(args):
     if not prompt:
         print("empty prompt", file=sys.stderr)
         return 1
+    if args.resume and ClaudeCLI().session_busy(args.resume):
+        print(f"{RED}session {args.resume[:8]} is running right now{RESET}\n"
+              f"  Resuming it would fork a copy rather than continue it.\n"
+              f"  Wait for it to finish, or queue this as a new session.",
+              file=sys.stderr)
+        return 1
     cur = conn.execute(
-        """INSERT INTO jobs(prompt, working_dir, priority, created_at, source)
-           VALUES (?,?,?,?,?)""",
-        (prompt, os.path.abspath(args.cwd), args.priority, db.utcnow(), "cli"),
+        """INSERT INTO jobs(prompt, working_dir, priority, created_at, source,
+                            model, resume_session_id)
+           VALUES (?,?,?,?,?,?,?)""",
+        (prompt, os.path.abspath(args.cwd), args.priority, db.utcnow(), "cli",
+         args.model, args.resume),
     )
     conn.commit()
-    print(f"queued job {cur.lastrowid} (priority {args.priority}) in {args.cwd}")
+    detail = ", ".join(filter(None, [
+        f"priority {args.priority}",
+        f"model {args.model}" if args.model else None,
+        f"continues {args.resume[:8]}" if args.resume else None]))
+    print(f"queued job {cur.lastrowid} ({detail}) in {args.cwd}")
+    return 0
+
+
+def cmd_sessions(args):
+    from .server import resumable_sessions
+    conn = db.connect()
+    rows = resumable_sessions(conn)
+    if not rows:
+        print("no sessions to continue")
+        return 0
+    for r in rows:
+        flag = f"{YELLOW}running now{RESET}" if r["busy"] else f"{DIM}idle{RESET}"
+        print(f"  {r['session_id'][:8]}  {r['name'][:44]:<44} {flag}")
+    print(f"\n{DIM}  csched add --resume <id> \"your follow-up\"{RESET}")
     return 0
 
 
@@ -155,12 +181,18 @@ def main(argv=None):
     a.add_argument("-C", "--cwd", default=".", help="working dir for the job")
     a.add_argument("-p", "--priority", type=int, default=100,
                    help="lower runs first (default 100)")
+    a.add_argument("-m", "--model", default=None,
+                   help="opus, sonnet, haiku, fable, or a full model name")
+    a.add_argument("--resume", default=None, metavar="SESSION_ID",
+                   help="continue an existing session instead of starting fresh")
 
     l = sub.add_parser("ls", help="list queued jobs")
     l.add_argument("-a", "--all", action="store_true", help="include finished")
 
     c = sub.add_parser("cancel", help="cancel a pending job")
     c.add_argument("id", type=int)
+
+    sub.add_parser("sessions", help="sessions a follow-up could continue")
 
     e = sub.add_parser("events", help="recent domain events")
     e.add_argument("-n", "--limit", type=int, default=20)
@@ -177,7 +209,8 @@ def main(argv=None):
         runner.main()
         return 0
     return {"status": cmd_status, "add": cmd_add, "ls": cmd_ls,
-            "cancel": cmd_cancel, "events": cmd_events}[args.cmd](args)
+            "cancel": cmd_cancel, "events": cmd_events,
+            "sessions": cmd_sessions}[args.cmd](args)
 
 
 if __name__ == "__main__":
