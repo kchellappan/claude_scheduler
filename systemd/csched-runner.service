@@ -5,7 +5,7 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=%h/GithubRepos/claude_scheduler
+WorkingDirectory=@@REPO@@
 ExecStart=/usr/bin/python3 -m csched run
 Restart=always
 RestartSec=20

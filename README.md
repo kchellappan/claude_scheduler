@@ -1,5 +1,11 @@
 # csched
 
+> **This project is heavily AI-generated.** Nearly all of the code, tests and
+> documentation here were written by Claude (Opus 5) in Claude Code, working
+> from a human's requirements, review and design decisions. Read it with that
+> in mind: it is tested and works, but it has not had the kind of line-by-line
+> human authorship you might otherwise assume.
+
 Usage-aware job queue for Claude Code on a Pro plan. Polls your real limit
 utilisation, holds queued prompts until there is capacity to run them, and
 pushes your phone when capacity frees up.
@@ -9,8 +15,9 @@ pushes your phone when capacity frees up.
 - **Phase 1 (done)** — poller, SQLite store, gate logic, CLI readout. Zero deps.
 - **Phase 1.5 (done)** — web dashboard + JSON API over Tailscale. Still zero deps.
 - **Phase 2a (done)** — job runner: queued work runs as Remote Control sessions.
-- **Phase 2b** — dashboard deep links to those sessions.
-- **Phase 2c** — web push for gate events (needs the cert grant above).
+- **Phase 2b (done)** — dashboard deep links, model choice, session follow-ups,
+  folder picker.
+- **Phase 2c** — web push for gate events (needs the cert grant below).
 
 ## Dashboard
 
@@ -28,6 +35,30 @@ Plain HTTP is fine for viewing. Installing it as a PWA and receiving web push
     tailscale serve --bg --https=443 http://127.0.0.1:8787
     # then: https://<machine>.<tailnet>.ts.net
 
+## Install
+
+    git clone https://github.com/kchellappan/claude_scheduler.git
+    cd claude_scheduler
+    ./install.sh
+
+That checks prerequisites, writes three systemd user units and starts them.
+There is no dependency step: csched is stdlib-only and CI fails the build if a
+third-party import appears in `csched/`.
+
+    ./install.sh --dry-run     # print the units, change nothing
+    ./install.sh --status      # are the services running?
+    ./install.sh --uninstall   # stop and remove them (keeps the database)
+
+The units under `systemd/` are templates -- `WorkingDirectory` is a
+`@@REPO@@` placeholder that the installer replaces with wherever you cloned to,
+so the checkout does not have to live at any particular path.
+
+Without systemd, run the three processes yourself:
+
+    ./csched.sh poll    # usage poller
+    ./csched.sh run     # job runner
+    python3 -m csched.server
+
 ## Quick start
 
     ./csched.sh status      # gauges, gate state, queue depth
@@ -39,10 +70,7 @@ Plain HTTP is fine for viewing. Installing it as a PWA and receiving web push
     ./csched.sh events      # gate transitions
     ./csched.sh poll        # run the poller in the foreground
 
-Install the poller as a user service:
-
-    systemctl --user enable --now $(pwd)/systemd/csched-poller.service
-    systemctl --user enable --now $(pwd)/systemd/csched-server.service
+Services are managed by `./install.sh` (see above).
 
 ## How queued jobs run
 

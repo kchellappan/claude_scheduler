@@ -23,5 +23,11 @@ jobs:
         run: |
           python -m compileall -q csched tests
           ! grep -rnE "^\s*(import|from)\s+(fastapi|flask|requests|httpx|pydantic|uvicorn|pytest)" csched/
+      - name: Lint shell scripts
+        run: |
+          bash -n install.sh csched.sh
+          command -v shellcheck >/dev/null && shellcheck install.sh csched.sh || true
+      - name: Check systemd units keep their placeholder
+        run: grep -q '@@REPO@@' systemd/csched-poller.service
       - name: Run tests
         run: python -m unittest discover -s tests -v
