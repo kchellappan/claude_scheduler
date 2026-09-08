@@ -27,5 +27,10 @@ WEEKLY_PACE_SLACK = float(os.environ.get("CSCHED_WEEKLY_SLACK", "15"))
 # above this hits the real limit mid-flight, which wastes the tokens it spent.
 WEEKLY_HARD_MAX_PCT = float(os.environ.get("CSCHED_WEEKLY_HARD_MAX", "95"))
 
+# How many jobs may run at once. Each is a full Claude Code session, so more
+# than one both burns budget faster and risks two sessions editing one repo.
+MAX_CONCURRENT = int(os.environ.get("CSCHED_MAX_CONCURRENT", "1"))
+RUNNER_INTERVAL_S = int(os.environ.get("CSCHED_RUNNER_INTERVAL", "20"))
+
 # A reading older than this is not trusted for gating decisions.
 STALE_AFTER_S = int(os.environ.get("CSCHED_STALE_AFTER", "600"))
