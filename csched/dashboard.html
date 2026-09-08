@@ -71,6 +71,28 @@ select:disabled{opacity:.5}
 .err{background:var(--bad);color:#fff;padding:9px 12px;border-radius:9px;
   font-size:13px}
 .blocked{color:var(--warn)}
+.dirbtn{display:flex;align-items:center;gap:8px;width:100%;text-align:left;
+  padding:10px;border-radius:9px;background:var(--bg);color:var(--ink);
+  border:1px solid var(--line);overflow:hidden}
+.dirbtn span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.picker{border:1px solid var(--line);border-radius:11px;padding:12px;
+  background:var(--bg)}
+.crumb{font-size:12px;color:var(--dim);word-break:break-all;margin-bottom:9px}
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px}
+.chip{font-size:12px;padding:6px 10px;border-radius:999px;
+  border:1px solid var(--line);background:var(--card);color:var(--ink);
+  cursor:pointer;max-width:100%;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap}
+.chip:hover{border-color:var(--dim)}
+.dirlist{max-height:230px;overflow-y:auto;border-top:1px solid var(--line)}
+.dirrow{display:flex;align-items:center;gap:9px;width:100%;padding:11px 4px;
+  border:0;border-bottom:1px solid var(--line);background:none;color:var(--ink);
+  text-align:left;cursor:pointer;font-size:14px}
+.dirrow:hover{color:var(--accent)}
+.dirrow .git{font-size:11px;color:var(--ok);border:1px solid var(--ok);
+  border-radius:5px;padding:1px 5px;flex:none}
+.pickfoot{display:flex;gap:8px;margin-top:11px}
+.pickfoot .primary{flex:1;padding:11px}
 textarea{resize:vertical;min-height:70px}
 .form{display:flex;flex-direction:column;gap:9px;margin-top:12px}
 .form .side{display:flex;gap:9px}
@@ -112,8 +134,20 @@ textarea{resize:vertical;min-height:70px}
   <div class="form">
     <textarea id="prompt" placeholder="Queue a prompt…"></textarea>
     <div class="side">
-      <input id="cwd" placeholder="working dir (default ~)">
+      <button type="button" class="dirbtn" id="pickDir">
+        <span aria-hidden="true">📁</span><span id="cwdLabel">Home (default)</span>
+      </button>
       <input id="prio" type="number" value="100" style="max-width:96px" title="priority">
+    </div>
+    <input type="hidden" id="cwd">
+    <div class="picker" id="picker" hidden>
+      <div class="chips" id="dirRecent"></div>
+      <div class="crumb" id="dirCrumb"></div>
+      <div class="dirlist" id="dirList"></div>
+      <div class="pickfoot">
+        <button class="primary" id="useDir">Use this folder</button>
+        <button type="button" id="closeDir">cancel</button>
+      </div>
     </div>
     <div class="side">
       <select id="model" title="model">
@@ -303,6 +337,49 @@ function syncSessions(sessions){
       esc(x.name)}${x.busy ? ' — running now' : ''}</option>`).join('');
   if([...sel.options].some(o => o.value === keep && !o.disabled)) sel.value = keep;
 }
+
+// The page runs on a phone but jobs run on this machine, so the listing comes
+// from the server -- a browser file picker would show the phone's storage.
+let dirNow = null;
+
+async function openDirs(path){
+  const res = await fetch('/api/dirs' + (path ? '?path=' + encodeURIComponent(path) : ''));
+  dirNow = await res.json();
+  $('picker').hidden = false;
+  $('dirCrumb').textContent = dirNow.path + (dirNow.is_git ? '  (git repo)' : '');
+
+  $('dirRecent').innerHTML = (dirNow.recent || []).map(pth =>
+    `<button type="button" class="chip" data-pick="${esc(pth)}">${
+      esc(pth.split('/').pop() || pth)}</button>`).join('');
+
+  const up = dirNow.parent
+    ? `<button type="button" class="dirrow" data-go="${esc(dirNow.parent)}">↑ ..</button>`
+    : '';
+  $('dirList').innerHTML = up + (dirNow.entries.length
+    ? dirNow.entries.map(e =>
+        `<button type="button" class="dirrow" data-go="${esc(e.path)}">
+           <span>${esc(e.name)}</span>${e.is_git ? '<span class="git">git</span>' : ''}
+         </button>`).join('')
+    : '<div class="empty">No subfolders here.</div>');
+}
+
+function setCwd(path){
+  $('cwd').value = path || '';
+  $('cwdLabel').textContent = path
+    ? (path.split('/').slice(-2).join('/') || path) : 'Home (default)';
+  $('picker').hidden = true;
+}
+
+$('pickDir').onclick = () => $('picker').hidden
+  ? openDirs($('cwd').value || null) : ($('picker').hidden = true);
+$('closeDir').onclick = () => { $('picker').hidden = true; };
+$('useDir').onclick = () => setCwd(dirNow && dirNow.path);
+$('picker').addEventListener('click', e => {
+  const go = e.target.closest('[data-go]');
+  if(go) return openDirs(go.dataset.go);
+  const pick = e.target.closest('[data-pick]');
+  if(pick) return setCwd(pick.dataset.pick);
+});
 
 async function cancel(id){
   await fetch(`/api/jobs/${id}/cancel`, {method:'POST',

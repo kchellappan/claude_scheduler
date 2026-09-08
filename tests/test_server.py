@@ -231,3 +231,120 @@ class ListingUnavailable(HTTPMixin, StateTest):
         """Only follow-ups depend on the listing; ordinary work must not stop."""
         status, _ = self.post({"prompt": "hi"})
         self.assertEqual(status, 200)
+
+
+class TempTreeMixin:
+    """A throwaway directory tree, rooted as BROWSE_ROOT."""
+
+    def make_tree(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        self.tmp = Path(tempfile.mkdtemp(prefix="csched-browse-"))
+        (self.tmp / "repo-a" / ".git").mkdir(parents=True)
+        (self.tmp / "plain").mkdir()
+        (self.tmp / ".hidden").mkdir()
+        (self.tmp / "notes.txt").write_text("x")
+        self._cleanup = lambda: shutil.rmtree(self.tmp, ignore_errors=True)
+        self._saved_root = server.config.BROWSE_ROOT
+        server.config.BROWSE_ROOT = self.tmp
+
+    def drop_tree(self):
+        server.config.BROWSE_ROOT = self._saved_root
+        self._cleanup()
+
+
+class DirectoryBrowsing(TempTreeMixin, StateTest):
+    """The picker lists directories on this machine, not on the phone."""
+
+    def setUp(self):
+        super().setUp()
+        self.make_tree()
+
+    def tearDown(self):
+        self.drop_tree()
+        super().tearDown()
+
+    def names(self, **kw):
+        return [e["name"] for e in server.browse(self.conn, **kw)["entries"]]
+
+    def test_lists_subdirectories(self):
+        self.assertIn("repo-a", self.names())
+        self.assertIn("plain", self.names())
+
+    def test_files_are_not_listed(self):
+        self.assertNotIn("notes.txt", self.names())
+
+    def test_hidden_directories_are_skipped(self):
+        self.assertNotIn(".hidden", self.names())
+
+    def test_git_repositories_are_flagged(self):
+        entries = {e["name"]: e for e in server.browse(self.conn)["entries"]}
+        self.assertTrue(entries["repo-a"]["is_git"])
+        self.assertFalse(entries["plain"]["is_git"])
+
+    def test_root_has_no_parent(self):
+        self.assertIsNone(server.browse(self.conn)["parent"])
+
+    def test_descending_sets_a_parent(self):
+        child = server.browse(self.conn, path=str(self.tmp / "repo-a"))
+        self.assertEqual(child["parent"], str(self.tmp))
+
+    def test_path_outside_the_root_snaps_back(self):
+        """Not a security boundary -- a queued job runs with tool access
+        anyway -- but the picker should not wander off."""
+        self.assertEqual(server.browse(self.conn, path="/etc")["path"],
+                         str(self.tmp))
+
+    def test_traversal_snaps_back(self):
+        self.assertEqual(
+            server.browse(self.conn, path=str(self.tmp / ".." / ".."))["path"],
+            str(self.tmp))
+
+    def test_nonexistent_path_snaps_back(self):
+        self.assertEqual(
+            server.browse(self.conn, path="/no/such/place")["path"],
+            str(self.tmp))
+
+    def test_recent_directories_come_from_past_jobs(self):
+        self.conn.execute(
+            "INSERT INTO jobs(prompt,working_dir,created_at) "
+            "VALUES('x','/some/repo',?)", (db.utcnow(),))
+        self.conn.commit()
+        self.assertIn("/some/repo", server.browse(self.conn)["recent"])
+
+    def test_unreadable_directory_is_empty_not_an_error(self):
+        locked = self.tmp / "locked"
+        locked.mkdir(mode=0o000)
+        try:
+            self.assertEqual(server.browse(self.conn, path=str(locked))["entries"], [])
+        finally:
+            locked.chmod(0o755)
+
+
+class DirectoryEndpoint(HTTPMixin, TempTreeMixin, StateTest):
+    def setUp(self):
+        super().setUp()
+        self.make_tree()
+        self.start_http()
+
+    def tearDown(self):
+        self.stop_http()
+        self.drop_tree()
+        super().tearDown()
+
+    def get(self, query=""):
+        import urllib.request
+        with urllib.request.urlopen(
+                f"http://127.0.0.1:{self.port}/api/dirs{query}", timeout=10) as r:
+            return json.loads(r.read())
+
+    def test_endpoint_lists_the_root(self):
+        self.assertEqual(self.get()["path"], str(self.tmp))
+
+    def test_endpoint_accepts_a_path(self):
+        import urllib.parse
+        target = str(self.tmp / "repo-a")
+        body = self.get("?path=" + urllib.parse.quote(target))
+        self.assertEqual(body["path"], target)
+        self.assertTrue(body["is_git"])
