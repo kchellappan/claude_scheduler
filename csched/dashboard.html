@@ -65,8 +65,12 @@ button{font:inherit;border:1px solid var(--line);background:transparent;
 button:hover{color:var(--ink);border-color:var(--dim)}
 button.primary{background:var(--accent);color:#fff;border-color:transparent;
   padding:10px 16px;font-weight:600}
-textarea,input{font:inherit;width:100%;background:var(--bg);color:var(--ink);
-  border:1px solid var(--line);border-radius:9px;padding:10px}
+textarea,input,select{font:inherit;width:100%;background:var(--bg);
+  color:var(--ink);border:1px solid var(--line);border-radius:9px;padding:10px}
+select:disabled{opacity:.5}
+.err{background:var(--bad);color:#fff;padding:9px 12px;border-radius:9px;
+  font-size:13px}
+.blocked{color:var(--warn)}
 textarea{resize:vertical;min-height:70px}
 .form{display:flex;flex-direction:column;gap:9px;margin-top:12px}
 .form .side{display:flex;gap:9px}
@@ -111,6 +115,19 @@ textarea{resize:vertical;min-height:70px}
       <input id="cwd" placeholder="working dir (default ~)">
       <input id="prio" type="number" value="100" style="max-width:96px" title="priority">
     </div>
+    <div class="side">
+      <select id="model" title="model">
+        <option value="">Default model</option>
+        <option value="opus">Opus</option>
+        <option value="sonnet">Sonnet</option>
+        <option value="haiku">Haiku</option>
+        <option value="fable">Fable</option>
+      </select>
+      <select id="resume" title="continue an existing session">
+        <option value="">New session</option>
+      </select>
+    </div>
+    <div id="addErr"></div>
     <button class="primary" id="add">Queue it</button>
   </div>
 </div>
@@ -194,6 +211,8 @@ async function refresh(){
 
   sparkline(s.history);
 
+  syncSessions(s.sessions || []);
+
   $('qmeta').textContent = `${s.queue.pending} pending · ${s.queue.running} running`;
   $('jobs').innerHTML = s.queue.jobs.length
     ? s.queue.jobs.map(jobRow).join('')
@@ -241,12 +260,17 @@ function jobRow(j){
   const timing = j.status === 'running' ? ` · ${elapsed(j.started_at)}`
                : j.finished_at ? ` · took ${elapsed(j.started_at, j.finished_at)}`
                : '';
+  const tags = [j.model, j.resume_session_id ? 'follow-up' : null]
+    .filter(Boolean).map(t => ` · ${esc(t)}`).join('');
+  // A follow-up whose target is live: it will start when that session ends.
+  const wait = j.blocked
+    ? ` · <span class="blocked">waiting for its session to finish</span>` : '';
   return `<div class="job">
     <div class="dot${live}" style="background:${col}"></div>
     <div class="txt">
       <div class="p">${esc(j.prompt)}</div>
       <div class="sub">#${j.id} · ${j.status} · ${esc(dir)} · p${j.priority}${
-        timing}${j.error ? ' · ' + esc(j.error) : ''}</div>
+        timing}${tags}${wait}${j.error ? ' · ' + esc(j.error) : ''}</div>
     </div>
     <div class="act">${jobAction(j)}</div>
   </div>`;
@@ -266,6 +290,20 @@ function summarise(p){
 const esc = s => String(s ?? '').replace(/[&<>"]/g,
   c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 
+// Live sessions are offered but disabled: resuming one forks a copy instead
+// of continuing it, so the choice is shown and explained rather than hidden.
+function syncSessions(sessions){
+  const sel = $('resume');
+  const sig = JSON.stringify(sessions.map(x => [x.session_id, x.busy]));
+  if(sel.dataset.sig === sig) return;
+  sel.dataset.sig = sig;
+  const keep = sel.value;
+  sel.innerHTML = '<option value="">New session</option>' + sessions.map(x =>
+    `<option value="${esc(x.session_id)}" ${x.busy ? 'disabled' : ''}>${
+      esc(x.name)}${x.busy ? ' — running now' : ''}</option>`).join('');
+  if([...sel.options].some(o => o.value === keep && !o.disabled)) sel.value = keep;
+}
+
 async function cancel(id){
   await fetch(`/api/jobs/${id}/cancel`, {method:'POST',
     headers:{'Content-Type':'application/json'}, body:'{}'});
@@ -276,10 +314,20 @@ $('add').onclick = async () => {
   const prompt = $('prompt').value.trim();
   if(!prompt) return;
   $('add').disabled = true;
-  await fetch('/api/jobs', {method:'POST', headers:{'Content-Type':'application/json'},
+  $('addErr').innerHTML = '';
+  const res = await fetch('/api/jobs', {method:'POST',
+    headers:{'Content-Type':'application/json'},
     body: JSON.stringify({prompt, working_dir: $('cwd').value.trim() || null,
-                          priority: Number($('prio').value) || 100})});
-  $('prompt').value = ''; $('add').disabled = false;
+                          priority: Number($('prio').value) || 100,
+                          model: $('model').value || null,
+                          resume_session_id: $('resume').value || null})});
+  if(res.ok){ $('prompt').value = ''; }
+  else {
+    const body = await res.json().catch(() => ({}));
+    $('addErr').innerHTML = `<div class="err">${
+      esc(body.error || 'could not queue that')}</div>`;
+  }
+  $('add').disabled = false;
   refresh();
 };
 

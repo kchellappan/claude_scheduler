@@ -16,20 +16,26 @@ class FakeCLI:
         self.spawned = []
         self.fail_with = fail_with
         self.bridges = {}
+        self.busy = set()
+        self.listing_ok = True     # False mimics `claude agents` failing
         self._next = 0
 
-    def spawn(self, prompt, cwd, name):
+    def busy_sessions(self):
+        return set(self.busy) if self.listing_ok else None
+
+    def spawn(self, prompt, cwd, name, model=None, resume=None):
         if self.fail_with:
             raise SpawnError(self.fail_with)
         self._next += 1
         bg_id = f"bg{self._next:04d}"
-        self.spawned.append({"prompt": prompt, "cwd": cwd, "name": name})
+        self.spawned.append({"prompt": prompt, "cwd": cwd, "name": name,
+                             "model": model, "resume": resume})
         self.sessions.append({"id": bg_id, "pid": 1000 + self._next,
                               "sessionId": f"uuid-{self._next}", "state": "running"})
         return bg_id
 
     def agents(self):
-        return list(self.sessions)
+        return list(self.sessions) if self.listing_ok else None
 
     def finish(self, bg_id):
         for s in self.sessions:
@@ -248,3 +254,118 @@ class FastJobs(BridgeIds):
         payload = json.loads(self.conn.execute(
             "SELECT payload FROM events WHERE kind='job_done'").fetchone()["payload"])
         self.assertEqual(payload["url"], "https://claude.ai/code/session_01FAST")
+
+
+class ModelSelection(RunnerTest):
+    def test_model_is_passed_through(self):
+        self.usage()
+        self.conn.execute(
+            "INSERT INTO jobs(prompt,working_dir,created_at,model) "
+            "VALUES('x','/tmp',?,'sonnet')", (db.utcnow(),))
+        self.conn.commit()
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.cli.spawned[0]["model"], "sonnet")
+
+    def test_no_model_means_claude_code_decides(self):
+        self.usage()
+        self.add()
+        runner.tick(self.conn, self.cli)
+        self.assertIsNone(self.cli.spawned[0]["model"])
+
+
+class ResumingSessions(RunnerTest):
+    def follow_up(self, target, priority=100):
+        cur = self.conn.execute(
+            "INSERT INTO jobs(prompt,working_dir,created_at,priority,"
+            "resume_session_id) VALUES('follow up','/tmp',?,?,?)",
+            (db.utcnow(), priority, target))
+        self.conn.commit()
+        return cur.lastrowid
+
+    def test_resume_is_passed_through(self):
+        self.usage()
+        self.follow_up("sess-abc")
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.cli.spawned[0]["resume"], "sess-abc")
+
+    def test_waits_while_the_target_is_live(self):
+        """Launching now would fork a copy rather than continue the session."""
+        self.usage()
+        jid = self.follow_up("sess-abc")
+        self.cli.busy = {"sess-abc"}
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "pending")
+        self.assertEqual(self.cli.spawned, [])
+
+    def test_starts_once_the_target_goes_idle(self):
+        self.usage()
+        jid = self.follow_up("sess-abc")
+        self.cli.busy = {"sess-abc"}
+        runner.tick(self.conn, self.cli)
+        self.cli.busy = set()
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+
+    def test_blocked_follow_up_does_not_hold_up_the_queue(self):
+        """A waiting follow-up is skipped, not a barrier -- otherwise one
+        long-running session stalls every unrelated job behind it."""
+        self.usage()
+        blocked = self.follow_up("sess-abc", priority=1)
+        other = self.add("unrelated work", priority=50)
+        self.cli.busy = {"sess-abc"}
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(blocked)["status"], "pending")
+        self.assertEqual(self.job(other)["status"], "running")
+
+
+class ListingUnavailable(RunnerTest):
+    """Regression: `claude agents` failing returned [], and a job whose session
+    is absent counts as finished -- so one timeout marked every running job
+    done. Unavailable is now None and must be treated as "do not conclude"."""
+
+    def test_running_jobs_are_not_marked_done(self):
+        self.usage()
+        jid = self.add()
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+        self.cli.listing_ok = False         # listing unavailable
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+
+    def test_queue_drained_is_not_emitted(self):
+        self.usage()
+        self.add()
+        runner.tick(self.conn, self.cli)
+        self.cli.listing_ok = False
+        runner.tick(self.conn, self.cli)
+        self.assertNotIn("queue_drained", self.kinds())
+
+    def test_follow_ups_are_held(self):
+        self.usage()
+        cur = self.conn.execute(
+            "INSERT INTO jobs(prompt,working_dir,created_at,resume_session_id)"
+            " VALUES('f','/tmp',?,'sess-abc')", (db.utcnow(),))
+        self.conn.commit()
+        self.cli.listing_ok = False
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(cur.lastrowid)["status"], "pending")
+
+    def test_ordinary_jobs_still_launch(self):
+        self.usage()
+        jid = self.add()
+        self.cli.listing_ok = False
+        runner.tick(self.conn, self.cli)
+        self.assertEqual(self.job(jid)["status"], "running")
+
+
+class RealCLIFailures(unittest.TestCase):
+    def test_missing_binary_yields_none_not_empty(self):
+        from csched.claudecli import ClaudeCLI
+        cli = ClaudeCLI(binary="definitely-not-a-real-binary-xyz")
+        self.assertIsNone(cli.agents())
+        self.assertIsNone(cli.busy_sessions())
+
+    def test_unknown_session_state_counts_as_busy(self):
+        from csched.claudecli import ClaudeCLI
+        cli = ClaudeCLI(binary="definitely-not-a-real-binary-xyz")
+        self.assertTrue(cli.session_busy("anything"))

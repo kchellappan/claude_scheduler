@@ -30,14 +30,25 @@ class ClaudeCLI:
             [self.binary, *args], cwd=cwd, capture_output=True, text=True,
             timeout=timeout or self.timeout)
 
-    def spawn(self, prompt, cwd, name):
+    def spawn(self, prompt, cwd, name, model=None, resume=None):
         """Start a detached, Remote-Control-enabled session. Returns its short id.
 
         --bg detaches so no TTY is needed; --remote-control still applies, which
         is what makes the session reachable from the phone. Headless (-p) would
         not be: Remote Control attaches to interactive sessions only.
+
+        With `resume`, the prompt continues that session with its history
+        intact. Only safe when the target is idle -- Claude Code forks a copy
+        under a new id if it is still running, which is not a continuation.
+        Callers check `session_busy` first.
         """
-        proc = self._run(["--bg", "--remote-control", name, prompt], cwd=cwd)
+        args = ["--bg"]
+        if resume:
+            args += ["--resume", resume]
+        if model:
+            args += ["--model", model]
+        args += ["--remote-control", name, prompt]
+        proc = self._run(args, cwd=cwd)
         match = _BG_ID.search(proc.stdout or "")
         if not match:
             raise SpawnError(
@@ -45,12 +56,37 @@ class ClaudeCLI:
         return match.group(1)
 
     def agents(self):
-        """All sessions including completed background ones."""
+        """All sessions including completed background ones.
+
+        Returns None -- not [] -- when the listing could not be obtained.
+        Callers must not read "no sessions" out of "could not ask": a job whose
+        session is absent counts as finished, so conflating the two would mark
+        every running job done the first time this timed out.
+        """
         try:
             proc = self._run(["agents", "--json", "--all"], timeout=60)
             return json.loads(proc.stdout or "[]")
-        except (subprocess.TimeoutExpired, json.JSONDecodeError):
-            return []
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, OSError):
+            return None
+
+    def busy_sessions(self):
+        """Session ids that are live right now, or None if unknowable.
+
+        Interactive sessions carry no `state`, so anything listed without a
+        finished state counts as busy -- that is what stops a queued follow-up
+        from forking a terminal you are actively typing in.
+        """
+        agents = self.agents()
+        if agents is None:
+            return None
+        return {a["sessionId"] for a in agents
+                if a.get("sessionId") and a.get("state") != "done"}
+
+    def session_busy(self, session_id):
+        """Unknown counts as busy: refusing a resume we cannot verify is
+        recoverable, forking a live session is not."""
+        busy = self.busy_sessions()
+        return True if busy is None else session_id in busy
 
     def stop(self, bg_id):
         try:
