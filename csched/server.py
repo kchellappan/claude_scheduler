@@ -6,12 +6,13 @@ auth boundary.
 """
 import json
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
 from . import config, db, gate, poller
+from .claudecli import remote_control_url
 
 HTML = (Path(__file__).parent / "dashboard.html").read_bytes()
 PORT = int(os.environ.get("CSCHED_PORT", "8787"))
@@ -42,13 +43,20 @@ def state():
         row = db.latest_sample(conn)
         g = gate.evaluate(row)
         pending, running = poller.queue_depth(conn)
+        # finished_at is an ISO string with an offset; SQLite's datetime()
+        # renders "YYYY-MM-DD HH:MM:SS", and comparing the two as text puts
+        # 'T' above ' ', so anything finishing earlier on the cutoff date
+        # compared greater. Pass a matching ISO cutoff instead.
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
         jobs = [dict(r) for r in conn.execute(
             "SELECT id,prompt,working_dir,priority,status,created_at,started_at,"
-            "finished_at,attempts,error FROM jobs "
-            "WHERE status IN ('pending','running') OR "
-            "  finished_at > datetime('now','-1 day') "
+            "finished_at,attempts,error,bridge_session_id FROM jobs "
+            "WHERE status IN ('pending','running') OR finished_at > ? "
             "ORDER BY CASE status WHEN 'running' THEN 0 WHEN 'pending' THEN 1 "
-            "  ELSE 2 END, priority, created_at LIMIT 50")]
+            "  ELSE 2 END, priority, created_at LIMIT 50", (cutoff,))]
+        for job in jobs:
+            # The URL shape lives in one place; the page just renders it.
+            job["rc_url"] = remote_control_url(job.pop("bridge_session_id"))
         events = [dict(r) for r in conn.execute(
             "SELECT id,created_at,kind,payload FROM events "
             "ORDER BY id DESC LIMIT 15")]
