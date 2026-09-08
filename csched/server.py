@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import config, db, gate, poller
 from .claudecli import ClaudeCLI, remote_control_url
@@ -36,6 +36,66 @@ def busy_sessions():
         return None
     return {a["sessionId"] for a in listing
             if a.get("sessionId") and a.get("state") != "done"}
+
+
+def browse(conn, path=None):
+    """Directories under BROWSE_ROOT, plus the ones actually worth picking.
+
+    The page runs on a phone but jobs run on this machine, so the listing has
+    to come from here -- a browser file picker would show the phone's storage.
+    """
+    root = config.BROWSE_ROOT.resolve()
+    try:
+        here = Path(path).expanduser().resolve() if path else root
+    except (OSError, ValueError):
+        here = root
+    # Stay inside the root; a path from outside it silently snaps back.
+    if here != root and root not in here.parents:
+        here = root
+
+    try:
+        here_is_git = (here / ".git").exists()
+    except OSError:
+        here_is_git = False
+
+    entries = []
+    try:
+        for child in sorted(here.iterdir(), key=lambda c: c.name.lower()):
+            if child.name.startswith(".") or not child.is_dir():
+                continue
+            try:
+                is_git = (child / ".git").exists()
+            except OSError:
+                is_git = False
+            entries.append({"name": child.name, "path": str(child),
+                            "is_git": is_git})
+            if len(entries) >= 400:
+                break
+    except (PermissionError, OSError):
+        entries = []
+
+    # Directories already in play beat browsing for them.
+    recent, seen = [], set()
+    for row in conn.execute(
+            "SELECT working_dir, MAX(id) AS last FROM jobs "
+            "GROUP BY working_dir ORDER BY last DESC LIMIT 8"):
+        if row["working_dir"] not in seen:
+            seen.add(row["working_dir"])
+            recent.append(row["working_dir"])
+    for a in agents() or []:
+        cwd = a.get("cwd")
+        if cwd and cwd not in seen and len(recent) < 12:
+            seen.add(cwd)
+            recent.append(cwd)
+
+    return {
+        "path": str(here),
+        "parent": None if here == root else str(here.parent),
+        "root": str(root),
+        "is_git": here_is_git,
+        "entries": entries,
+        "recent": recent,
+    }
 
 
 def resumable_sessions(conn):
@@ -164,6 +224,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, HTML, "text/html; charset=utf-8")
         if path == "/api/state":
             return self._send(200, json.dumps(state()).encode())
+        if path == "/api/dirs":
+            query = parse_qs(urlparse(self.path).query)
+            conn = db.connect()
+            try:
+                return self._send(200, json.dumps(
+                    browse(conn, (query.get("path") or [None])[0])).encode())
+            finally:
+                conn.close()
         if path == "/api/sessions":
             conn = db.connect()
             try:

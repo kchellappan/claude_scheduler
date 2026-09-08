@@ -79,6 +79,20 @@ every running job done. Unknown also counts as busy when deciding whether a
 follow-up may resume, since refusing is recoverable and forking a live session
 is not.
 
+### Picking a working directory
+
+The dashboard's folder picker is served from `/api/dirs` rather than a browser
+file input. The page runs on a phone but jobs run on *this* machine, so a
+client-side picker would browse the wrong filesystem entirely -- and
+`webkitdirectory` yields filenames without server paths in any case.
+
+It lists directories under `CSCHED_BROWSE_ROOT` (default `~`), marks git
+repositories, and offers recently used directories as chips -- from previous
+jobs and from live `claude agents` working directories, which covers most
+picks without browsing at all. A path outside the root snaps back to it; that
+is tidiness, not a security boundary, since a queued job runs Claude Code with
+tool access regardless.
+
 ### Choosing a model
 
 `-m/--model` takes `opus`, `sonnet`, `haiku`, `fable`, or a full model name,

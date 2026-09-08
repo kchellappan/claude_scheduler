@@ -27,6 +27,11 @@ WEEKLY_PACE_SLACK = float(os.environ.get("CSCHED_WEEKLY_SLACK", "15"))
 # above this hits the real limit mid-flight, which wastes the tokens it spent.
 WEEKLY_HARD_MAX_PCT = float(os.environ.get("CSCHED_WEEKLY_HARD_MAX", "95"))
 
+# Root the dashboard's directory picker can browse. Not a security boundary --
+# a queued job runs Claude Code with tool access anyway -- but it keeps the
+# picker to the part of the disk worth showing.
+BROWSE_ROOT = Path(os.environ.get("CSCHED_BROWSE_ROOT", HOME)).expanduser()
+
 # How many jobs may run at once. Each is a full Claude Code session, so more
 # than one both burns budget faster and risks two sessions editing one repo.
 MAX_CONCURRENT = int(os.environ.get("CSCHED_MAX_CONCURRENT", "1"))
