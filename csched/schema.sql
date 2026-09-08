@@ -30,6 +30,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     exit_code     INTEGER,
     output_path   TEXT,
     error         TEXT,
+    bg_id             TEXT,   -- short id from `claude --bg`, for agents/logs/stop
+    bridge_session_id TEXT,   -- Remote Control session; URL is claude.ai/code/<id>
     source        TEXT    NOT NULL DEFAULT 'cli'    -- cli | phone | api
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_queue ON jobs(status, priority, created_at);

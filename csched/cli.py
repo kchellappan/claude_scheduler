@@ -4,7 +4,8 @@ import os
 import sys
 from datetime import datetime, timezone
 
-from . import config, db, gate, poller
+from . import config, db, gate, poller, runner
+from .claudecli import remote_control_url
 
 RESET, DIM, BOLD = "\033[0m", "\033[2m", "\033[1m"
 GREEN, YELLOW, RED, GREY = "\033[32m", "\033[33m", "\033[31m", "\033[90m"
@@ -110,6 +111,9 @@ def cmd_ls(args):
         prompt = prompt[:58] + "…" if len(prompt) > 59 else prompt
         print(f"  {marks.get(r['status'], '?')} {r['id']:>4}  {prompt:<60} "
               f"{DIM}{os.path.basename(r['working_dir'])}{RESET}")
+        url = remote_control_url(r["bridge_session_id"])
+        if url and r["status"] == "running":
+            print(f"       {DIM}↳ open on any device: {url}{RESET}")
     return 0
 
 
@@ -162,11 +166,15 @@ def main(argv=None):
     e.add_argument("-n", "--limit", type=int, default=20)
 
     sub.add_parser("poll", help="run the poller in the foreground")
+    sub.add_parser("run", help="run the job runner in the foreground")
 
     args = p.parse_args(argv)
     db.init()
     if args.cmd == "poll":
         poller.main()
+        return 0
+    if args.cmd == "run":
+        runner.main()
         return 0
     return {"status": cmd_status, "add": cmd_add, "ls": cmd_ls,
             "cancel": cmd_cancel, "events": cmd_events}[args.cmd](args)

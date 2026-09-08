@@ -8,8 +8,9 @@ pushes your phone when capacity frees up.
 
 - **Phase 1 (done)** — poller, SQLite store, gate logic, CLI readout. Zero deps.
 - **Phase 1.5 (done)** — web dashboard + JSON API over Tailscale. Still zero deps.
-- **Phase 2** — web-push notifier + PWA install (needs the cert grant above).
-- **Phase 3** — job runner (`claude -p`, fresh session per job).
+- **Phase 2a (done)** — job runner: queued work runs as Remote Control sessions.
+- **Phase 2b** — dashboard deep links to those sessions.
+- **Phase 2c** — web push for gate events (needs the cert grant above).
 
 ## Dashboard
 
@@ -39,6 +40,40 @@ Install the poller as a user service:
 
     systemctl --user enable --now $(pwd)/systemd/csched-poller.service
     systemctl --user enable --now $(pwd)/systemd/csched-server.service
+
+## How queued jobs run
+
+A job is launched as a **background Remote Control session**, not a headless
+run:
+
+    claude --bg --remote-control "csched #12: <prompt>" "<prompt>"
+
+`--bg` detaches so no TTY is needed, and `--remote-control` still applies. The
+session then appears in the Claude app's session list and can be opened and
+steered from a phone mid-flight. Headless `-p` cannot do this: Remote Control
+attaches to interactive sessions only, so a `-p` job would be a transcript you
+can read but not join.
+
+The phone-openable URL is `https://claude.ai/code/<bridgeSessionId>`, found by:
+
+    claude agents --json --all  ->  pid  ->  ~/.claude/sessions/<pid>.json
+                                             .bridgeSessionId
+
+Remote Control connects a moment *after* launch, so the id is absent when the
+job starts and gets picked up on a later tick. It is also captured one last
+time just before a job is marked done, because a short job can finish inside a
+single tick and would otherwise lose its URL entirely.
+
+A session missing from `claude agents --json --all` is treated as finished. We
+cannot distinguish "crashed" from "cleaned up", and leaving the job `running`
+forever would wedge the queue behind it.
+
+### Sessions you start yourself are not gated
+
+Sessions launched from the Claude app or `claude remote-control` bypass the
+gate entirely and run immediately. That is intended -- they are you asking for
+work now, not the queue pacing itself -- but it does mean the gauges can move
+for reasons the queue cannot explain.
 
 ## Tests
 
